@@ -1,17 +1,18 @@
-package com.mydp.service.impl;
+package com.hmdp.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.mydp.dto.Result;
-import com.mydp.entity.VoucherOrder;
-import com.mydp.mapper.VoucherOrderMapper;
-import com.mydp.service.ISeckillVoucherService;
-import com.mydp.service.IVoucherOrderService;
-import com.mydp.utils.RedisIdWorker;
-import com.mydp.utils.UserHolder;
+import com.hmdp.dto.Result;
+import com.hmdp.entity.VoucherOrder;
+import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.service.ISeckillVoucherService;
+import com.hmdp.service.IVoucherOrderService;
+import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -177,25 +178,49 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
+    @Resource
+    RabbitTemplate rabbitTemplate;
     @Override
     public Result seckillVoucher(Long voucherId) {
+        //1.执行lua脚本，判断当前用户的购买资格
         Long userId = UserHolder.getUser().getId();
-        long orderId = redisIdWorker.nextId("order");
-        // 1.执行lua脚本
         Long result = stringRedisTemplate.execute(
                 SECKILL_SCRIPT,
                 Collections.emptyList(),
-                voucherId.toString(), userId.toString(), String.valueOf(orderId)
-        );
-        int r = result.intValue();
-        // 2.判断结果是否为0
-        if (r != 0) {
-            // 2.1.不为0 ，代表没有购买资格
-            return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
+                voucherId.toString(), userId.toString());
+        if (result != 0) {
+            //2.不为0说明没有购买资格
+            return Result.fail(result==1?"库存不足":"不能重复下单");
         }
-        // 3.返回订单id
+        //3.走到这一步说明有购买资格，将订单信息存到消息队列
+        VoucherOrder voucherOrder = new VoucherOrder();
+        long orderId = redisIdWorker.nextId("order");
+        voucherOrder.setId(orderId);
+        voucherOrder.setUserId(UserHolder.getUser().getId());
+        voucherOrder.setVoucherId(voucherId);
+        //存入消息队列等待异步消费
+        rabbitTemplate.convertAndSend("hmdianping.direct","direct.seckill",voucherOrder);
         return Result.ok(orderId);
     }
+//    @Override
+//    public Result seckillVoucher(Long voucherId) {
+//        Long userId = UserHolder.getUser().getId();
+//        long orderId = redisIdWorker.nextId("order");
+//        // 1.执行lua脚本
+//        Long result = stringRedisTemplate.execute(
+//                SECKILL_SCRIPT,
+//                Collections.emptyList(),
+//                voucherId.toString(), userId.toString(), String.valueOf(orderId)
+//        );
+//        int r = result.intValue();
+//        // 2.判断结果是否为0
+//        if (r != 0) {
+//            // 2.1.不为0 ，代表没有购买资格
+//            return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
+//        }
+//        // 3.返回订单id
+//        return Result.ok(orderId);
+//    }
 
     /*@Override
     public Result seckillVoucher(Long voucherId) {
